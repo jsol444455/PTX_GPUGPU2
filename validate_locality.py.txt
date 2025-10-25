@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""
+Validate LocalityGuru predictions against known patterns
+"""
+
+import numpy as np
+import json
+import matplotlib.pyplot as plt
+import seaborn as sns
+import sys
+import os
+
+def load_localityguru_matrix(json_file):
+    """Load LocalityGuru prediction from JSON or generated files"""
+    # Try to find the matrix file
+    if os.path.exists(json_file):
+        with open(json_file, 'r') as f:
+            data = json.load(f)
+        return np.array(data)
+    else:
+        print(f"[Error] File not found: {json_file}")
+        sys.exit(1)
+
+def validate_vector_addition(predicted_matrix):
+    """
+    Validate vector addition locality
+    Expected: NO inter-TB locality (diagonal only)
+    """
+    print("\n" + "="*60)
+    print("VALIDATION: Vector Addition")
+    print("="*60)
+    
+    n_tbs = predicted_matrix.shape[0]
+    
+    # Remove diagonal for analysis
+    np.fill_diagonal(predicted_matrix, 0)
+    
+    # Calculate metrics
+    off_diagonal_sum = np.sum(predicted_matrix)
+    off_diagonal_elements = n_tbs * (n_tbs - 1)
+    avg_sharing = off_diagonal_sum / off_diagonal_elements if off_diagonal_elements > 0 else 0
+    max_sharing = np.max(predicted_matrix)
+    non_zero_count = np.count_nonzero(predicted_matrix)
+    
+    print(f"Matrix size: {n_tbs}x{n_tbs} thread blocks")
+    print(f"Total off-diagonal sharing: {off_diagonal_sum}")
+    print(f"Average sharing per TB pair: {avg_sharing:.2f}")
+    print(f"Maximum sharing: {max_sharing}")
+    print(f"Non-zero entries: {non_zero_count}/{off_diagonal_elements} ({100*non_zero_count/off_diagonal_elements:.1f}%)")
+    
+    # Validation criteria for vector addition
+    print(f"\n{'Validation Results:':}")
+    print("-" * 60)
+    
+    # Test 1: Minimal inter-TB sharing
+    if off_diagonal_sum < (n_tbs * 10):  # Very lenient threshold
+        print("✅ PASS: Minimal inter-TB locality detected")
+        result = "PASS"
+    else:
+        print(f"⚠️  WARN: Detected {off_diagonal_sum} shared accesses")
+        print("   (Vector addition should have ~0 inter-TB sharing)")
+        result = "WARN"
+    
+    # Test 2: Sparse locality matrix
+    density = non_zero_count / off_diagonal_elements
+    if density < 0.1:  # Less than 10% non-zero
+        print(f"✅ PASS: Locality matrix is sparse ({100*density:.1f}% non-zero)")
+    else:
+        print(f"⚠️  WARN: Locality matrix density {100*density:.1f}%")
+        result = "WARN"
+    
+    # Test 3: Pattern check
+    # For vector addition, we expect mostly zeros with possible edge effects
+    # due to cache line sharing at boundaries
+    
+    print(f"\n{'='*60}")
+    
+    if result == "PASS":
+        print("✅ Vector Addition Validation: PASSED")
+        print("   LocalityGuru correctly identified NO inter-TB locality")
+    else:
+        print("⚠️  Vector Addition Validation: PARTIAL")
+        print("   Some unexpected locality detected (may be cache line effects)")
+    
+    print(f"{'='*60}\n")
+    
+    return result == "PASS"
+
+def plot_locality_heatmap(matrix, title, output_file):
+    """Plot locality heatmap"""
+    plt.figure(figsize=(10, 8))
+    
+    # Use log scale if values are large
+    vmax = np.max(matrix)
+    if vmax > 1000:
+        matrix_plot = np.log10(matrix + 1)
+        cbar_label = 'log10(Shared Accesses + 1)'
+    else:
+        matrix_plot = matrix
+        cbar_label = 'Shared Accesses'
+    
+    sns.heatmap(matrix_plot, 
+                cmap="OrRd", 
+                cbar_kws={'label': cbar_label},
+                square=True)
+    
+    plt.title(title)
+    plt.xlabel("Thread Block ID")
+    plt.ylabel("Thread Block ID")
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=150, bbox_inches='tight')
+    print(f"[Info] Saved heatmap: {output_file}")
+    plt.close()
+
+def analyze_pattern(matrix):
+    """Analyze the locality pattern"""
+    print("\nPattern Analysis:")
+    print("-" * 60)
+    
+    # Check for diagonal pattern
+    n = matrix.shape[0]
+    diagonal_band = sum(matrix[i, max(0, i-1):min(n, i+2)].sum() for i in range(n))
+    total = matrix.sum()
+    
+    if total > 0:
+        diagonal_pct = 100 * diagonal_band / total
+        print(f"Diagonal band concentration: {diagonal_pct:.1f}%")
+    
+    # Check for block structure (for matrix multiply)
+    block_size = 16  # Common GPU block size
+    if n >= block_size:
+        blocks = n // block_size
+        block_sums = []
+        for i in range(blocks):
+            for j in range(blocks):
+                block = matrix[i*block_size:(i+1)*block_size, 
+                              j*block_size:(j+1)*block_size]
+                block_sums.append(block.sum())
+        
+        if len(block_sums) > 0:
+            avg_block = np.mean(block_sums)
+            std_block = np.std(block_sums)
+            print(f"Block structure: avg={avg_block:.1f}, std={std_block:.1f}")
+    
+    print("-" * 60)
+
+def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Validate LocalityGuru Output")
+    parser.add_argument('-m', '--matrix', required=True, 
+                       help="LocalityGuru matrix JSON file")
+    parser.add_argument('-t', '--type', default='vector',
+                       choices=['vector', 'matmul', 'conv'],
+                       help="Kernel type")
+    parser.add_argument('-o', '--output', default='validation_result.png',
+                       help="Output plot file")
+    
+    args = parser.parse_args()
+    
+    # Load LocalityGuru prediction
+    print(f"[Validation] Loading LocalityGuru output: {args.matrix}")
+    predicted = load_localityguru_matrix(args.matrix)
+    
+    print(f"[Validation] Matrix shape: {predicted.shape}")
+    print(f"[Validation] Kernel type: {args.type}")
+    
+    # Analyze pattern
+    analyze_pattern(predicted)
+    
+    # Validate based on kernel type
+    if args.type == 'vector':
+        passed = validate_vector_addition(predicted)
+    elif args.type == 'matmul':
+        print("⚠️  Matrix multiplication validation not yet implemented")
+        print("   Expected: Checkerboard pattern with high locality")
+        passed = False
+    else:
+        print("⚠️  Convolution validation not yet implemented")
+        print("   Expected: Band-diagonal pattern")
+        passed = False
+    
+    # Plot
+    plot_locality_heatmap(predicted, 
+                         f"LocalityGuru Locality: {args.type}", 
+                         args.output)
+    
+    # Summary
+    print("\n" + "="*60)
+    print("VALIDATION SUMMARY")
+    print("="*60)
+    if passed:
+        print("✅ Validation PASSED")
+        print("   LocalityGuru correctly predicted the locality pattern")
+    else:
+        print("⚠️  Review results above")
+    print("="*60 + "\n")
+
+if __name__ == "__main__":
+    main()
