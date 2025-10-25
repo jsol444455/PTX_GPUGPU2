@@ -20,9 +20,9 @@ def ABS(a):
 def SUB(a,b):
     return f"({a} - {b})"
 def MADLO(a,b,c):
-    return f"(( {a} *  {b} )&0x0000000011111111) + {c}"
+    return f"(({a})*({b})+({c}))"  # No mask needed
 def MAD(a,b,c):
-    return f"(( {a} *  {b} )&0x0000000011111111) + {c}"
+    return f"(({a})*({b})+({c}))"  # No mask needed
 def MUL(a,b):
     return f"({a} * {b})"
 def LD(a):
@@ -56,9 +56,30 @@ def SELP(a,b,c):
         return f"{a}"
     else:
         return f"{b}"
-    #return f"({a} if {c==1} else {b})"
+
+
 def SETP(a,b,c):
     return SELP(a,b,c)
+
+# NEW: Binary comparison operations for predicate evaluation
+def SETP_GT_BIN(a, b):
+    return f"({a} > {b})"
+
+def SETP_LT_BIN(a, b):
+    return f"({a} < {b})"
+
+def SETP_GE_BIN(a, b):
+    return f"({a} >= {b})"
+
+def SETP_LE_BIN(a, b):
+    return f"({a} <= {b})"
+
+def SETP_EQ_BIN(a, b):
+    return f"({a} == {b})"
+
+def SETP_NE_BIN(a, b):
+    return f"({a} != {b})"
+
 def SETP_GE(a,b,c):
     if c>=1:
         return f"{a}"
@@ -97,7 +118,7 @@ def MAX(a,b):
         return f"{b}"
     return f"{a}"
 def NEG(a):
-    return f"{a*-1}"
+    return f"(-({a}))"  # Fixed: Generate negation formula
 def CLZ(a):
     cnt =0
     while(True):
@@ -267,5 +288,3 @@ if __name__ == "__main__":
     #srad_v1_init()
     #bfs_init()
     hotspot_init()
-
-
