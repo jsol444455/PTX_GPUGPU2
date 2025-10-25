@@ -90,10 +90,10 @@ def get_threadID(nctaid_x,nctaid_y,ntid_x,ntid_y,file_name,param_file_name, form
         if kernel_name not in Block:
             Block[kernel_name] = list()
             thread_dict[kernel_name] = list()
-        ## coalescing에 맞게 결과 반영
+        ## coalescingì—  ë§žê²Œ ê²°ê³¼ ë°˜ì˜ 
         
         
-        ## coalescing 결과를 이 전에 반영
+        ## coalescing ê²°ê³¼ë¥¼ ì ´ ì „ì—  ë°˜ì˜ 
         coalescing_avg = 0.0
         coalescing_map = [0]*32
         line_cnt = 0
