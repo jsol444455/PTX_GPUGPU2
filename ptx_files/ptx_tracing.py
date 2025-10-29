@@ -555,7 +555,8 @@ def GetTBAddressMap(syntax_tree, kernel_name, grid_dim, block_dim,
                             # Line 16-19: Evaluate formula for this thread
                             try:
                                 # Check if this is a loop access (not fully implemented yet)
-                                loop_addresses = None  # Placeholder for loop handling
+                                loop_addresses = get_loop_addresses(bb_graph, kernel_name, formular, 
+                                      thread_param_dict, predicates)
                                 
                                 if loop_addresses:
                                     # Line 18: EvalSTloop(ST, Map)
@@ -975,10 +976,10 @@ def make_ctaid_map(formular, kernel_info=None, bb_graph=None, kernel_name=None, 
     """
     global ctaid_map
     
-    # Initialize ctaid_map
+    # Initialize ctaid_map - FIXED VERSION
+    ctaid_map.clear()  # Clear first
     for i in range(ctaidy * ctaidx):
-        for j in range(ctaidy * ctaidx):
-            ctaid_map[i][j] = 0
+        ctaid_map.append([0] * (ctaidy * ctaidx))  # Create each row properly
     
     # Use GetTBAddressMap if we have all required information
     if kernel_info and bb_graph and kernel_name:
