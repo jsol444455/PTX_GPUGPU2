@@ -557,7 +557,7 @@ def get_loop_addresses(bb_graph, kernel_name, formular, param_dict, predicates):
     while iteration_count < max_iterations:
         try:
             # Evaluate loop predicate
-            pred_result = eval_predicate_tree(loop_predicate, loop_param_dict)
+            pred_result = eval_predicate_tree(loop_predicate, 0, loop_param_dict)
             
             if not pred_result:
                 break  # Exit loop
@@ -842,33 +842,35 @@ def GetTBAddressMap(syntax_tree, kernel_name, grid_dim, block_dim,
                             except Exception as e:
                                 # If predicate evaluation fails, include thread by default
                                 pass
-                            # ##########################################
-                            # Line 16-19: Evaluate formula for this thread
-                            # Line 16-19: Evaluate formula for this thread
-                        try:
-                            # Check if this is a loop access - ACTUALLY CALL THE FUNCTION NOW
-                            loop_addresses = get_loop_addresses(
-                                bb_graph, 
-                                kernel_name, 
-                                formular, 
-                                thread_param_dict,  # Use thread-specific params
-                                predicates
-                            )
                             
-                            if loop_addresses:
-                                # Line 18: EvalSTloop(ST, Map) - Loop access found
-                                print(f"[GetTBAddressMap] TB {TB_id}, Thread ({tid_x},{tid_y}): Found {len(loop_addresses)} loop addresses")
-                                TB_Address_map[TB_id]["addresses"].update(loop_addresses)
-                            else:
-                                # Line 17: Insert (EvalST(reg) + offset) into Map[TB] - Non-loop access
-                                if formular:
-                                    address = evaluate_formula(formular, thread_param_dict)
-                                    if address is not None:
-                                        TB_Address_map[TB_id]["addresses"].add(address)
-                        except Exception as e:
-                            # If formula evaluation fails, log and skip this thread
-                            print(f"[GetTBAddressMap] Error evaluating address for TB {TB_id}, Thread ({tid_x},{tid_y}): {e}")
-                            continue
+                            # ============================================================
+                            # CRITICAL FIX: Proper indentation for loop evaluation
+                            # Line 16-19: Evaluate formula for this thread
+                            # ============================================================
+                            try:
+                                # Check if this is a loop access - ACTUALLY CALL THE FUNCTION NOW
+                                loop_addresses = get_loop_addresses(
+                                    bb_graph, 
+                                    kernel_name, 
+                                    formular, 
+                                    thread_param_dict,  # Use thread-specific params
+                                    predicates
+                                )
+                                
+                                if loop_addresses:
+                                    # Line 18: EvalSTloop(ST, Map) - Loop access found
+                                    print(f"[GetTBAddressMap] TB {TB_id}, Thread ({tid_x},{tid_y}): Found {len(loop_addresses)} loop addresses")
+                                    TB_Address_map[TB_id]["addresses"].update(loop_addresses)
+                                else:
+                                    # Line 17: Insert (EvalST(reg) + offset) into Map[TB] - Non-loop access
+                                    if formular:
+                                        address = evaluate_formula(formular, thread_param_dict)
+                                        if address is not None:
+                                            TB_Address_map[TB_id]["addresses"].add(address)
+                            except Exception as e:
+                                # If formula evaluation fails, log and skip this thread
+                                print(f"[GetTBAddressMap] Error evaluating address for TB {TB_id}, Thread ({tid_x},{tid_y}): {e}")
+                                continue
     
     # Line 24: return Map
     print(f"[GetTBAddressMap] Complete. Processed {len(TB_Address_map)} thread blocks")
