@@ -443,33 +443,90 @@ def get_node_value(tree, node_idx, param_dict):
 # FIXED: get_loop_addresses function
 # ============================================================================
 
-def get_loop_addresses(bb_graph, kernel_name, formular, param_dict, predicates, loop_tree=None):
+def get_loop_addresses(bb_graph, kernel_name, formular, param_dict, predicates):
     """
-    FIXED: Algorithm 2 Line 18: EvalSTloop(ST, Map)
+    Algorithm 2 Line 18: EvalSTloop(ST, Map)
     Returns set of addresses accessed by all loop iterations
     
-    Key fix: Now properly updates the loop tree structure (Line 5) before 
-    evaluating addresses (Line 6) in each iteration
+    FIXED VERSION - Handles cases where memory access is not in loop header
     """
     if kernel_name not in bb_graph:
+        print(f"[get_loop_addresses] Kernel {kernel_name} not in bb_graph")
         return None
     
-    # Find if this access is in a loop BB
+    # Find basic blocks with memory accesses
+    ld_global_bbs = [bb_n for bb_n, bb_info in bb_graph[kernel_name].items() 
+                     if bb_info.get("has_ld_global", False)]
+    
+    # Find basic blocks that are loop headers
+    loop_header_bbs = [bb_n for bb_n, bb_info in bb_graph[kernel_name].items() 
+                       if bb_info.get("is_loop_header", False)]
+    
+    print(f"[get_loop_addresses] Found {len(ld_global_bbs)} BBs with ld.global: {ld_global_bbs}")
+    print(f"[get_loop_addresses] Found {len(loop_header_bbs)} loop headers: {loop_header_bbs}")
+    
     loop_bb = None
-    for bb_n, bb_info in bb_graph[kernel_name].items():
-        if bb_info.get("is_loop_header", False) and bb_info.get("has_ld_global", False):
+    loop_info = None
+    
+    # Strategy 1: Try to find a BB that is BOTH a loop header AND has ld.global
+    for bb_n in ld_global_bbs:
+        bb_info = bb_graph[kernel_name][bb_n]
+        if bb_info.get("is_loop_header", False):
             loop_bb = bb_n
+            loop_info = bb_info
+            print(f"[get_loop_addresses] Strategy 1: Found BB {bb_n} that is both loop header and has ld.global")
             break
     
-    if loop_bb is None:
+    # Strategy 2: If memory access is in a separate BB from loop header,
+    # try to associate it with a nearby loop header
+    if loop_bb is None and ld_global_bbs:
+        print(f"[get_loop_addresses] Strategy 1 failed, trying Strategy 2")
+        for header_bb_n in loop_header_bbs:
+            header_info = bb_graph[kernel_name][header_bb_n]
+            
+            # Check if this loop header has all required information
+            if (header_info.get("loop_variables") and 
+                header_info.get("loop_predicate")):
+                
+                # Check if any ld.global BB is close to this loop header
+                # Simple heuristic: if ld.global BB is within a few blocks of loop header
+                for ld_bb_n in ld_global_bbs:
+                    if abs(ld_bb_n - header_bb_n) <= 5:  # Within 5 basic blocks
+                        loop_bb = header_bb_n
+                        loop_info = header_info
+                        print(f"[get_loop_addresses] Strategy 2: Associated ld.global BB {ld_bb_n} with loop header BB {header_bb_n}")
+                        break
+                
+                if loop_bb is not None:
+                    break
+    
+    # Strategy 3: If we still haven't found it, just use the first loop header
+    # that has complete information
+    if loop_bb is None and loop_header_bbs:
+        print(f"[get_loop_addresses] Strategy 2 failed, trying Strategy 3")
+        for header_bb_n in loop_header_bbs:
+            header_info = bb_graph[kernel_name][header_bb_n]
+            if (header_info.get("loop_variables") and 
+                header_info.get("loop_predicate")):
+                loop_bb = header_bb_n
+                loop_info = header_info
+                print(f"[get_loop_addresses] Strategy 3: Using loop header BB {header_bb_n}")
+                break
+    
+    if loop_bb is None or loop_info is None:
+        print(f"[get_loop_addresses] No suitable loop found, returning None")
         return None  # Not a loop access
     
     # Get loop information
-    bb_info = bb_graph[kernel_name][loop_bb]
-    loop_variables = bb_info.get("loop_variables", [])
-    loop_predicate_name = bb_info.get("loop_predicate")
+    loop_variables = loop_info.get("loop_variables", [])
+    loop_predicate_name = loop_info.get("loop_predicate")
     
-    if not loop_variables or not loop_predicate_name:
+    if not loop_variables:
+        print(f"[get_loop_addresses] No loop variables found in BB {loop_bb}")
+        return None
+        
+    if not loop_predicate_name:
+        print(f"[get_loop_addresses] No loop predicate found in BB {loop_bb}")
         return None
     
     # Evaluate loop iterations
@@ -477,6 +534,7 @@ def get_loop_addresses(bb_graph, kernel_name, formular, param_dict, predicates, 
     
     # Get loop predicate tree
     if loop_predicate_name not in predicates:
+        print(f"[get_loop_addresses] Predicate {loop_predicate_name} not in predicates dict")
         return None
     
     loop_predicate = predicates[loop_predicate_name]
@@ -485,82 +543,51 @@ def get_loop_addresses(bb_graph, kernel_name, formular, param_dict, predicates, 
     loop_param_dict = param_dict.copy()
     
     # Find loop iterator variable
-    if loop_variables:
-        loop_var = loop_variables[0]  # Primary loop variable
-        iterator_name = loop_var.get("register", "loop_iter")
-        
-        # Initialize loop iterator
-        loop_param_dict[iterator_name] = 0
-        max_iterations = 10000  # Safety limit
-        iteration_count = 0
-        
-        # Line 3: while EvalST(BB_label) != 0 do
-        while iteration_count < max_iterations:
-            try:
-                # Evaluate loop predicate
-                pred_result = eval_predicate_tree(loop_predicate, loop_param_dict)
-                
-                if not pred_result:
-                    break  # Exit loop
-                
-                # ============================================================
-                # FIX: Line 5 MUST happen before Line 6
-                # Update the loop tree with current loop variable values
-                # ============================================================
-                if loop_tree is not None:
-                    # Update leaf nodes in the loop tree with current loop vars
-                    updated_tree = update_loop_tree_leaf_nodes(loop_tree, loop_param_dict)
-                    
-                    # Evaluate the UPDATED tree to get address
-                    address = tracing(updated_tree, 0)
-                else:
-                    # Fallback: Use formula string evaluation
-                    address = evaluate_formula(formular, loop_param_dict)
-                
-                if address is not None:
-                    loop_addresses.add(address)
-                
-                # ============================================================
-                # Line 4: Update loop_iterator
-                # ============================================================
-                update_operation = loop_var.get("operation", "add")
-                
-                if update_operation in ["add", "add.s32", "add.u32"]:
-                    # Get increment value from loop variable sources
-                    increment = 1  # Default
-                    sources = loop_var.get("sources", [])
-                    if len(sources) > 1:
-                        # Try to parse increment from second source
-                        try:
-                            increment = int(sources[1])
-                        except:
-                            increment = 1
-                    loop_param_dict[iterator_name] += increment
-                    
-                elif update_operation in ["sub", "sub.s32", "sub.u32"]:
-                    decrement = 1  # Default
-                    sources = loop_var.get("sources", [])
-                    if len(sources) > 1:
-                        try:
-                            decrement = int(sources[1])
-                        except:
-                            decrement = 1
-                    loop_param_dict[iterator_name] -= decrement
-                else:
-                    # Unknown operation, increment by default
-                    loop_param_dict[iterator_name] += 1
-                
-                iteration_count += 1
-                
-            except Exception as e:
-                print(f"[Warning] Loop evaluation error at iteration {iteration_count}: {e}")
-                break
+    loop_var = loop_variables[0]  # Primary loop variable
+    iterator_name = loop_var.get("register", "loop_iter")
     
-    if loop_addresses:
-        print(f"[Info] Loop collected {len(loop_addresses)} unique addresses across {iteration_count} iterations")
+    print(f"[get_loop_addresses] Evaluating loop with iterator: {iterator_name}")
     
+    # Initialize loop iterator
+    loop_param_dict[iterator_name] = 0
+    max_iterations = 10000  # Safety limit
+    iteration_count = 0
+    
+    # Line 3: while EvalST(BB_label) != 0 do
+    while iteration_count < max_iterations:
+        try:
+            # Evaluate loop predicate
+            pred_result = eval_predicate_tree(loop_predicate, loop_param_dict)
+            
+            if not pred_result:
+                break  # Exit loop
+            
+            # Line 6: Map[TB].insert(EvalST(reg))
+            address = evaluate_formula(formular, loop_param_dict)
+            
+            if address is not None:
+                loop_addresses.add(address)
+            
+            # Line 4: Update loop_iterator
+            # Line 5: Update leaf_node reg in STloop(reg)
+            update_operation = loop_var.get("operation", "add")
+            
+            if update_operation in ["add", "add.s32", "add.u32"]:
+                loop_param_dict[iterator_name] += 1
+            elif update_operation in ["sub", "sub.s32", "sub.u32"]:
+                loop_param_dict[iterator_name] -= 1
+            else:
+                # Unknown operation, increment by default
+                loop_param_dict[iterator_name] += 1
+            
+            iteration_count += 1
+            
+        except Exception as e:
+            print(f"[get_loop_addresses] Loop evaluation error at iteration {iteration_count}: {e}")
+            break
+    
+    print(f"[get_loop_addresses] Completed {iteration_count} iterations, found {len(loop_addresses)} unique addresses")
     return loop_addresses if loop_addresses else None
-
 
 # ============================================================================
 # Predicate and Thread Filtering Functions
@@ -815,25 +842,33 @@ def GetTBAddressMap(syntax_tree, kernel_name, grid_dim, block_dim,
                             except Exception as e:
                                 # If predicate evaluation fails, include thread by default
                                 pass
-                            
+                            # ##########################################
                             # Line 16-19: Evaluate formula for this thread
-                            try:
-                                # Check if this is a loop access
-                                loop_addresses = get_loop_addresses(bb_graph, kernel_name, formular, 
-                                                                    thread_param_dict, predicates)
-                                
-                                if loop_addresses:
-                                    # Line 18: EvalSTloop(ST, Map)
-                                    TB_Address_map[TB_id]["addresses"].update(loop_addresses)
-                                else:
-                                    # Line 17: Insert (EvalST(reg) + offset) into Map[TB]
-                                    if formular:
-                                        address = evaluate_formula(formular, thread_param_dict)
-                                        if address is not None:
-                                            TB_Address_map[TB_id]["addresses"].add(address)
-                            except Exception as e:
-                                # If formula evaluation fails, skip this thread
-                                continue
+                            # Line 16-19: Evaluate formula for this thread
+                        try:
+                            # Check if this is a loop access - ACTUALLY CALL THE FUNCTION NOW
+                            loop_addresses = get_loop_addresses(
+                                bb_graph, 
+                                kernel_name, 
+                                formular, 
+                                thread_param_dict,  # Use thread-specific params
+                                predicates
+                            )
+                            
+                            if loop_addresses:
+                                # Line 18: EvalSTloop(ST, Map) - Loop access found
+                                print(f"[GetTBAddressMap] TB {TB_id}, Thread ({tid_x},{tid_y}): Found {len(loop_addresses)} loop addresses")
+                                TB_Address_map[TB_id]["addresses"].update(loop_addresses)
+                            else:
+                                # Line 17: Insert (EvalST(reg) + offset) into Map[TB] - Non-loop access
+                                if formular:
+                                    address = evaluate_formula(formular, thread_param_dict)
+                                    if address is not None:
+                                        TB_Address_map[TB_id]["addresses"].add(address)
+                        except Exception as e:
+                            # If formula evaluation fails, log and skip this thread
+                            print(f"[GetTBAddressMap] Error evaluating address for TB {TB_id}, Thread ({tid_x},{tid_y}): {e}")
+                            continue
     
     # Line 24: return Map
     print(f"[GetTBAddressMap] Complete. Processed {len(TB_Address_map)} thread blocks")
