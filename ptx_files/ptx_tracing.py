@@ -442,7 +442,7 @@ def get_node_value(tree, node_idx, param_dict):
 # ============================================================================
 # FIXED: get_loop_addresses function
 # ==========================================================================
-def get_loop_addresses(bb_graph, kernel_name, formular, param_dict, predicates):
+def get_loop_addresses(bb_graph, kernel_name, formular, param_dict, predicates, kernel_info=None):
     """
     COMPREHENSIVE FIX: Algorithm 2 Line 18: EvalSTloop(ST, Map)
     Returns set of addresses accessed by all loop iterations
@@ -547,18 +547,93 @@ def get_loop_addresses(bb_graph, kernel_name, formular, param_dict, predicates):
         print(f"[get_loop_addresses] → Falling back to non-loop address evaluation")
         return _fallback_single_address(formular, param_dict)
     
-    # Check if predicate exists in predicates dict
-    if loop_predicate_name not in predicates:
-        print(f"[get_loop_addresses] ⚠ Predicate '{loop_predicate_name}' not in predicates dict")
-        print(f"[get_loop_addresses] Available predicates: {list(predicates.keys())}")
+    # ==================================================================
+    # CRITICAL FIX: Normalize predicate name to match predicates dict
+    # ==================================================================
+    predicate_key = None
+    loop_pred_normalized = loop_predicate_name.replace("%", "")
+    
+    print(f"[get_loop_addresses] Looking for predicate: '{loop_predicate_name}'")
+    print(f"[get_loop_addresses] Available predicates: {list(predicates.keys())}")
+    
+    # Try multiple matching strategies
+    for key in predicates.keys():
+        # Strategy 1: Exact match
+        if key == loop_predicate_name:
+            predicate_key = key
+            print(f"[get_loop_addresses] ✓ Exact match: '{key}'")
+            break
+        
+        # Strategy 2: Match base name (e.g., "p0" matches "%p0_123")
+        key_base = key.split("_")[0].replace("%", "")
+        if key_base == loop_pred_normalized:
+            predicate_key = key
+            print(f"[get_loop_addresses] ✓ Base name match: '{loop_predicate_name}' -> '{key}'")
+            break
+        
+        # Strategy 3: Match with/without % prefix
+        if key.replace("%", "") == loop_pred_normalized:
+            predicate_key = key
+            print(f"[get_loop_addresses] ✓ Normalized match: '{loop_predicate_name}' -> '{key}'")
+            break
+    
+    # If still no match found, try fallback
+    if predicate_key is None:
+        print(f"[get_loop_addresses] ✗ Predicate '{loop_predicate_name}' NOT FOUND in predicates dict")
         print(f"[get_loop_addresses] → Falling back to non-loop address evaluation")
         return _fallback_single_address(formular, param_dict)
     
-    loop_predicate = predicates[loop_predicate_name]
+    loop_predicate = predicates[predicate_key]
+    print(f"[get_loop_addresses] ✓ Using predicate: '{predicate_key}'")
+    # ==================================================================
     
     # ========================================================================
-    # STEP 4: Evaluate loop iterations
+    # STEP 3.5: Check if loop tree exists and use it (CRITICAL FIX for Issue #3)
     # ========================================================================
+    if kernel_info and "loop_trees" in kernel_info.get(kernel_name, {}):
+        loop_trees = kernel_info[kernel_name]["loop_trees"]
+        
+        # Try to find the loop tree for this loop BB
+        loop_tree_key = None
+        for key in loop_trees.keys():
+            if f"_loop_bb{loop_bb}" in key:
+                loop_tree_key = key
+                break
+        
+        if loop_tree_key:
+            loop_tree = loop_trees[loop_tree_key]
+            print(f"[get_loop_addresses] ✓ Found loop tree: {loop_tree_key}")
+            print(f"[get_loop_addresses] Using eval_loop_syntax_tree() for proper Algorithm 2 implementation")
+            
+            try:
+                # USE THE PROPER ALGORITHM 2 IMPLEMENTATION!
+                addresses = eval_loop_syntax_tree(
+                    loop_tree=loop_tree,
+                    loop_predicate_tree=loop_predicate,
+                    param_dict=param_dict,
+                    max_iterations=10000
+                )
+                
+                if addresses:
+                    print(f"[get_loop_addresses] ✓ Loop tree evaluation found {len(addresses)} addresses")
+                    return set(addresses)  # Convert list to set
+                else:
+                    print(f"[get_loop_addresses] ⚠ Loop tree evaluation returned empty")
+                    # Fall through to simplified approach
+            except Exception as e:
+                print(f"[get_loop_addresses] ⚠ Loop tree evaluation failed: {e}")
+                import traceback
+                traceback.print_exc()
+                # Fall through to simplified approach
+        else:
+            print(f"[get_loop_addresses] ⚠ Loop tree not found for BB {loop_bb}")
+    else:
+        print(f"[get_loop_addresses] ⚠ No loop trees in kernel_info")
+    
+    # ========================================================================
+    # STEP 4: Evaluate loop iterations (SIMPLIFIED FALLBACK)
+    # ========================================================================
+    print(f"[get_loop_addresses] Using simplified loop evaluation (fallback)")
     loop_addresses = set()
     loop_param_dict = param_dict.copy()
     
@@ -884,7 +959,7 @@ def filter_addresses_by_active_threads(formular, idle_threads):
 # ============================================================================
 
 def GetTBAddressMap(syntax_tree, kernel_name, grid_dim, block_dim, 
-                    bb_graph, predicates, formular, param_dict):
+                    bb_graph, predicates, formular, param_dict, kernel_info=None):
     """
     Implements Algorithm 2 Lines 9-24: GetTBAddressMap(ST)
     
@@ -989,7 +1064,8 @@ def GetTBAddressMap(syntax_tree, kernel_name, grid_dim, block_dim,
                                     kernel_name, 
                                     formular, 
                                     thread_param_dict,  # Use thread-specific params
-                                    predicates
+                                    predicates,
+                                    kernel_info  # CRITICAL: Pass kernel_info!
                                 )
                                 
                                 if loop_addresses:
@@ -1272,7 +1348,8 @@ def make_ctaid_map(formular, kernel_info=None, bb_graph=None, kernel_name=None, 
                 bb_graph=bb_graph,
                 predicates=predicates,
                 formular=formular,
-                param_dict=param_dict
+                param_dict=param_dict,
+                kernel_info=kernel_info  # CRITICAL: Pass kernel_info!
             )
             
             # Convert TB_Address_map to ctaid_map format
