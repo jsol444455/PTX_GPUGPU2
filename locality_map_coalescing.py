@@ -71,9 +71,52 @@ def get_threadID(nctaid_x,nctaid_y,ntid_x,ntid_y,file_name,param_file_name, form
     parameter_dict["0x42A00000"] = 0x42A00000 
     parameter_dict["0xFFFFFFFFFFFFFFFF"] = 0xFFFFFFFFFFFFFFFF 
     
+    # Import ptx_tracing (moved to top level to avoid repeated imports)
+    import ptx_files.ptx_tracing as ptx_tracing
+    
     for kernel_name, ld_global in formul_dict.items():
         
         print(kernel_name)
+        
+        # ###################################
+        print(f"[DEBUG] Calling ptx_tracing functions for {kernel_name}")
+
+        # Set dimensions
+        ptx_tracing.ctaidx = nctaid_x
+        ptx_tracing.ctaidy = nctaid_y  
+        ptx_tracing.ntidx = ntid_x
+        ptx_tracing.ntidy = ntid_y
+        ptx_tracing.tidx = ntid_x
+        ptx_tracing.tidy = ntid_y
+        ptx_tracing.app_name = app_name  # FIX 1
+
+        # FIX 2: Load kernel parameters (matrix pointers, etc.)
+        param_file_path = f"syntax_tree/{file_name}/{file_name}_param.json"
+        if os.path.exists(param_file_path):
+            with open(param_file_path, 'r') as f:
+                kernel_params = json.load(f)
+                # Pass to ptx_tracing
+                for key, value in kernel_params.items():
+                    ptx_tracing.param_dict[key] = value
+            print(f"[DEBUG] Loaded {len(kernel_params)} kernel parameters")
+
+        # Load syntax tree file
+        st_file = f"syntax_tree/{file_name}/{file_name}_st.json"
+        print(f"[DEBUG] Loading syntax tree from: {st_file}")
+
+        if os.path.exists(st_file):
+            print(f"[DEBUG] Processing {st_file} with loop evaluation")
+            ptx_tracing.file_open(st_file)
+            print(f"[DEBUG] Loop evaluation complete")
+        else:
+            print(f"[ERROR] Syntax tree file not found: {st_file}")
+        # #######################################################
+        # Get the locality matrix
+        print(f"[DEBUG] Locality calculation complete")
+        # === END OF NEW BLOCK ===
+        
+        
+        
         if len(ld_global) == 0:
             continue
         thread_map = list()
@@ -120,6 +163,7 @@ def get_threadID(nctaid_x,nctaid_y,ntid_x,ntid_y,file_name,param_file_name, form
                             formul = ld_global[ld_reg]["final_formular"]
                             #print(formul)
                             res = eval(formul.format(**parameter_dict))
+                            # #############################################################
                             if(tId%32 == 0):
                                 start_point[global_cnt] = int(res/32)*32#res
 
@@ -155,43 +199,47 @@ def get_threadID(nctaid_x,nctaid_y,ntid_x,ntid_y,file_name,param_file_name, form
                 graph_name+="_kernel2"
             else:
                 graph_name+="_kernel1"
-        if app_name == "b+tree":
-            if(kernel_name.startswith("findK")):
-                graph_name+="_findK"
+        if app_name == "heartwall":
+            if(kernel_name.startswith("_Z6kernel")):
+                graph_name+="_kernel"
             else:
-                graph_name+="_findRageK"
-        # print("DDDDDDDDD")
-               
-        # no annotation
-        np_coalescing_map = np.array(coalescing_map)/line_cnt
-        dp_coalescing_map = pd.DataFrame(np_coalescing_map,dtype="float")
-        #y = np.array(coalescing_map)/line_cnt
-        plt.figure(figsize=(80,5))
-        plt.rc('font', size=20) 
-        # plt.rcParams["figure.figsize"] = (50,2)
-        # plt.xlabel('thread id', fontsize=20)
-        # plt.title(f"{graph_name}", fontsize=20)
-        # plt.yticks([None])
-        # sns.heatmap(dp_coalescing_map.T,cmap="Reds",vmin=0,annot=True, annot_kws={"size": 20})
-        hplot = sns.heatmap(dp_coalescing_map.T,cmap="Reds",vmin=0,annot_kws={"size": 20},square=True)
-        #hplot = sns.heatmap([y],vmin=0,cmap="Reds",annot=True,annot_kws={"size": 20},square=True)
+                graph_name+="_kernel_gpu_opencl"
+        if app_name == "hotspot":
+            graph_name+="_calculate_temp"
+        if app_name == "kmeans":
+            graph_name+="_kmeans_kernel_c"
+        if app_name == "lavaMD":
+            graph_name+="_kernel_gpu_opencl"
+        if app_name == "lud":
+            if(kernel_name.startswith("_Z11lud_diag")):
+                graph_name+="_lud_diagonal"
+            elif(kernel_name.startswith("_Z13lud_p")):
+                graph_name+="_lud_perimeter"
+            else:
+                graph_name+="_lud_internal"
+        if app_name == "nw":
+            if(kernel_name.startswith("_Z10nw_kernel1")):
+                graph_name+="_nw_kernel1"
+            else:
+                graph_name+="_nw_kernel2"
+        if app_name == "pathfinder":
+            graph_name+="_dynproc_kernel"
+        if app_name == "srad":
+            if(kernel_name.startswith("_Z6srad_c")):
+                graph_name+="_srad_cuda_1"
+            else:
+                graph_name+="_srad_cuda_2"
+        
         sector_expectation = 0
         cnt_tmp = 0
-        tmp_ = 0
-        for idx, i in enumerate(np_coalescing_map):
-            #print("ddddd")
-            i = float(int(i*100)/100.0)
-            #continue
-            if cnt_tmp%8 == 0:
-                cnt_tmp = 0
-                tmp_ = 0
-            if tmp_ == 0 and i!=0:
-                sector_expectation+=1
-                tmp_ = 1
-            
-            #print(f"{idx}: {i}")
-            #if idx%8 == 7:
-            #    print(f"------{sector_expectation}------")
+        for i,coa in enumerate(coalescing_map):
+            sector_expectation += coa * math.ceil((i+1)/4)
+        sector_expectation = sector_expectation/coalescing_avg*100
+        y = np.array(coalescing_map)/line_cnt
+        plt.figure(figsize=(45,2.5))
+        plt.rc('font', size=20) 
+        hplot = sns.heatmap([y],vmin=0,cmap="Reds",square=True)
+        for i, v in enumerate(y):
             cnt_tmp += 1
         #exit(1)
         hplot.set(yticklabels=[])
