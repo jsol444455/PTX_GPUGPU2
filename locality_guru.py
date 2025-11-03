@@ -159,19 +159,34 @@ def initialize_trees(ptx_file_name):
                     except:
                         pass
             
-            # NEW: Detect loop iterator updates
-            elif bb_n != -1 and (inst.strip().startswith("add") or inst.strip().startswith("sub")):
+            #
+            # NEW: Detect loop iterator updates (EXPANDED to include mad, mul, shl)
+            elif bb_n != -1 and any(inst.strip().startswith(op) for op in ["add", "sub", "mad", "mul", "shl"]):
                 try:
-                    opcode, dst, src = get_opcode(inst, "add" if "add" in inst else "sub")
+                    # Determine which operation type this is
+                    op_type = None
+                    for op in ["add", "sub", "mad", "mul", "shl"]:
+                        if inst.strip().startswith(op):
+                            op_type = op
+                            break
+                    
+                    if op_type is None:
+                        continue
+                    
+                    opcode, dst, src = get_opcode(inst, op_type)
+                    
+                    # Check if this is a self-update (dst appears in src list)
                     if isinstance(src, list) and dst in src:
                         if bb_n in bb_graph[kernel_name]:
+                            print(f"[LOOP VAR] BB {bb_n}: Detected loop variable {dst} = {opcode}({src})")
                             bb_graph[kernel_name][bb_n]["loop_variables"].append({
                                 "register": dst,
                                 "operation": opcode,
                                 "sources": src,
                                 "line": idx_
                             })
-                except:
+                except Exception as e:
+                    print(f"[LOOP VAR] Failed to parse instruction: {inst.strip()}, error: {e}")
                     pass
             # #
                 
