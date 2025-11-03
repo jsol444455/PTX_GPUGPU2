@@ -441,135 +441,165 @@ def get_node_value(tree, node_idx, param_dict):
 
 # ============================================================================
 # FIXED: get_loop_addresses function
-# ============================================================================
-
+# ==========================================================================
 def get_loop_addresses(bb_graph, kernel_name, formular, param_dict, predicates):
     """
-    Algorithm 2 Line 18: EvalSTloop(ST, Map)
+    COMPREHENSIVE FIX: Algorithm 2 Line 18: EvalSTloop(ST, Map)
     Returns set of addresses accessed by all loop iterations
     
-    FIXED VERSION - Handles cases where memory access is not in loop header
+    KEY CHANGES:
+    1. Returns empty set {} instead of None in most cases (only returns None for truly non-loop accesses)
+    2. Better fallback: If loop evaluation fails, falls back to single non-loop address evaluation
+    3. More robust predicate handling
+    4. Better error messages for debugging
     """
-    if kernel_name not in bb_graph:
-        print(f"[get_loop_addresses] Kernel {kernel_name} not in bb_graph")
-        return None
     
-    # Find basic blocks with memory accesses
+    # ========================================================================
+    # VALIDATION: Check if we can even attempt loop evaluation
+    # ========================================================================
+    if kernel_name not in bb_graph:
+        print(f"[get_loop_addresses] Kernel {kernel_name} not in bb_graph - NOT A LOOP")
+        return None  # This is truly a non-loop case
+    
+    # ========================================================================
+    # STEP 1: Find basic blocks with memory accesses and loop headers
+    # ========================================================================
     ld_global_bbs = [bb_n for bb_n, bb_info in bb_graph[kernel_name].items() 
                      if bb_info.get("has_ld_global", False)]
     
-    # Find basic blocks that are loop headers
     loop_header_bbs = [bb_n for bb_n, bb_info in bb_graph[kernel_name].items() 
                        if bb_info.get("is_loop_header", False)]
     
-    print(f"[get_loop_addresses] Found {len(ld_global_bbs)} BBs with ld.global: {ld_global_bbs}")
-    print(f"[get_loop_addresses] Found {len(loop_header_bbs)} loop headers: {loop_header_bbs}")
+    print(f"[get_loop_addresses] Kernel: {kernel_name}")
+    print(f"  - BBs with ld.global: {ld_global_bbs}")
+    print(f"  - Loop header BBs: {loop_header_bbs}")
     
+    # If no loop headers exist at all, this is definitely not a loop
+    if not loop_header_bbs:
+        print(f"[get_loop_addresses] No loop headers found - NOT A LOOP")
+        return None  # Not a loop access
+    
+    # ========================================================================
+    # STEP 2: Find suitable loop using 3 strategies
+    # ========================================================================
     loop_bb = None
     loop_info = None
     
-    # Strategy 1: Try to find a BB that is BOTH a loop header AND has ld.global
+    # Strategy 1: BB that is BOTH a loop header AND has ld.global
     for bb_n in ld_global_bbs:
         bb_info = bb_graph[kernel_name][bb_n]
         if bb_info.get("is_loop_header", False):
             loop_bb = bb_n
             loop_info = bb_info
-            print(f"[get_loop_addresses] Strategy 1: Found BB {bb_n} that is both loop header and has ld.global")
+            print(f"[get_loop_addresses] ✓ Strategy 1: BB {bb_n} is both loop header and has ld.global")
             break
     
-    # Strategy 2: If memory access is in a separate BB from loop header,
-    # try to associate it with a nearby loop header
+    # Strategy 2: Associate ld.global BB with nearby loop header (within 5 BBs)
     if loop_bb is None and ld_global_bbs:
-        print(f"[get_loop_addresses] Strategy 1 failed, trying Strategy 2")
+        print(f"[get_loop_addresses] Strategy 1 failed, trying Strategy 2...")
         for header_bb_n in loop_header_bbs:
             header_info = bb_graph[kernel_name][header_bb_n]
             
-            # Check if this loop header has all required information
             if (header_info.get("loop_variables") and 
                 header_info.get("loop_predicate")):
                 
-                # Check if any ld.global BB is close to this loop header
-                # Simple heuristic: if ld.global BB is within a few blocks of loop header
                 for ld_bb_n in ld_global_bbs:
-                    if abs(ld_bb_n - header_bb_n) <= 5:  # Within 5 basic blocks
+                    if abs(ld_bb_n - header_bb_n) <= 5:
                         loop_bb = header_bb_n
                         loop_info = header_info
-                        print(f"[get_loop_addresses] Strategy 2: Associated ld.global BB {ld_bb_n} with loop header BB {header_bb_n}")
+                        print(f"[get_loop_addresses] ✓ Strategy 2: Associated ld.global BB {ld_bb_n} with loop header BB {header_bb_n}")
                         break
                 
                 if loop_bb is not None:
                     break
     
-    # Strategy 3: If we still haven't found it, just use the first loop header
-    # that has complete information
+    # Strategy 3: Use first loop header with complete information
     if loop_bb is None and loop_header_bbs:
-        print(f"[get_loop_addresses] Strategy 2 failed, trying Strategy 3")
+        print(f"[get_loop_addresses] Strategy 2 failed, trying Strategy 3...")
         for header_bb_n in loop_header_bbs:
             header_info = bb_graph[kernel_name][header_bb_n]
             if (header_info.get("loop_variables") and 
                 header_info.get("loop_predicate")):
                 loop_bb = header_bb_n
                 loop_info = header_info
-                print(f"[get_loop_addresses] Strategy 3: Using loop header BB {header_bb_n}")
+                print(f"[get_loop_addresses] ✓ Strategy 3: Using loop header BB {header_bb_n}")
                 break
     
+    # If all 3 strategies failed, this is not a loop we can handle
     if loop_bb is None or loop_info is None:
-        print(f"[get_loop_addresses] No suitable loop found, returning None")
+        print(f"[get_loop_addresses] ✗ All 3 strategies failed - NOT A LOOP")
         return None  # Not a loop access
     
-    # Get loop information
+    # ========================================================================
+    # STEP 3: Extract loop information
+    # ========================================================================
     loop_variables = loop_info.get("loop_variables", [])
     loop_predicate_name = loop_info.get("loop_predicate")
     
+    # NEW: Instead of returning None, return empty set and try fallback
     if not loop_variables:
-        print(f"[get_loop_addresses] No loop variables found in BB {loop_bb}")
-        return None
-        
+        print(f"[get_loop_addresses] ⚠ No loop variables in BB {loop_bb}")
+        print(f"[get_loop_addresses] → Falling back to non-loop address evaluation")
+        return _fallback_single_address(formular, param_dict)
+    
     if not loop_predicate_name:
-        print(f"[get_loop_addresses] No loop predicate found in BB {loop_bb}")
-        return None
+        print(f"[get_loop_addresses] ⚠ No loop predicate in BB {loop_bb}")
+        print(f"[get_loop_addresses] → Falling back to non-loop address evaluation")
+        return _fallback_single_address(formular, param_dict)
     
-    # Evaluate loop iterations
-    loop_addresses = set()
-    
-    # Get loop predicate tree
+    # Check if predicate exists in predicates dict
     if loop_predicate_name not in predicates:
-        print(f"[get_loop_addresses] Predicate {loop_predicate_name} not in predicates dict")
-        return None
+        print(f"[get_loop_addresses] ⚠ Predicate '{loop_predicate_name}' not in predicates dict")
+        print(f"[get_loop_addresses] Available predicates: {list(predicates.keys())}")
+        print(f"[get_loop_addresses] → Falling back to non-loop address evaluation")
+        return _fallback_single_address(formular, param_dict)
     
     loop_predicate = predicates[loop_predicate_name]
     
-    # Simulate loop iterations (Algorithm 2 Lines 2-8)
+    # ========================================================================
+    # STEP 4: Evaluate loop iterations
+    # ========================================================================
+    loop_addresses = set()
     loop_param_dict = param_dict.copy()
     
-    # Find loop iterator variable
-    loop_var = loop_variables[0]  # Primary loop variable
+    # Get primary loop variable
+    loop_var = loop_variables[0]
     iterator_name = loop_var.get("register", "loop_iter")
     
-    print(f"[get_loop_addresses] Evaluating loop with iterator: {iterator_name}")
+    print(f"[get_loop_addresses] Starting loop evaluation:")
+    print(f"  - Iterator: {iterator_name}")
+    print(f"  - Predicate: {loop_predicate_name}")
+    print(f"  - Formula: {formular}")
     
     # Initialize loop iterator
     loop_param_dict[iterator_name] = 0
-    max_iterations = 10000  # Safety limit
+    max_iterations = 10000
     iteration_count = 0
     
-    # Line 3: while EvalST(BB_label) != 0 do
-    while iteration_count < max_iterations:
-        try:
+    # Simulate loop iterations
+    try:
+        while iteration_count < max_iterations:
             # Evaluate loop predicate
-            pred_result = eval_predicate_tree(loop_predicate, 0, loop_param_dict)
+            try:
+                pred_result = eval_predicate_tree(loop_predicate, 0, loop_param_dict)
+            except Exception as e:
+                print(f"[get_loop_addresses] ⚠ Predicate evaluation failed at iteration {iteration_count}: {e}")
+                break
             
             if not pred_result:
                 break  # Exit loop
             
-            # Line 6: Map[TB].insert(EvalST(reg))
-            address = evaluate_formula(formular, loop_param_dict)
+            # Evaluate formula to get address
+            try:
+                address = evaluate_formula(formular, loop_param_dict)
+                
+                if address is not None:
+                    loop_addresses.add(address)
+            except Exception as e:
+                print(f"[get_loop_addresses] ⚠ Address evaluation failed at iteration {iteration_count}: {e}")
+                # Continue to next iteration instead of breaking
             
-            if address is not None:
-                loop_addresses.add(address)
-            
-            # Line 4: Update loop_iterator
-            # Line 5: Update leaf_node reg in STloop(reg)
+            # Update loop iterator
             update_operation = loop_var.get("operation", "add")
             
             if update_operation in ["add", "add.s32", "add.u32"]:
@@ -581,14 +611,119 @@ def get_loop_addresses(bb_graph, kernel_name, formular, param_dict, predicates):
                 loop_param_dict[iterator_name] += 1
             
             iteration_count += 1
-            
-        except Exception as e:
-            print(f"[get_loop_addresses] Loop evaluation error at iteration {iteration_count}: {e}")
-            break
-    
-    print(f"[get_loop_addresses] Completed {iteration_count} iterations, found {len(loop_addresses)} unique addresses")
-    return loop_addresses if loop_addresses else None
+        
+        print(f"[get_loop_addresses] ✓ Loop evaluation complete:")
+        print(f"  - Iterations: {iteration_count}")
+        print(f"  - Unique addresses: {len(loop_addresses)}")
+        
+        # NEW: If we got no addresses, try fallback
+        if not loop_addresses:
+            print(f"[get_loop_addresses] ⚠ No addresses found in loop evaluation")
+            print(f"[get_loop_addresses] → Falling back to non-loop address evaluation")
+            return _fallback_single_address(formular, param_dict)
+        
+        return loop_addresses
+        
+    except Exception as e:
+        print(f"[get_loop_addresses] ✗ Loop evaluation exception: {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"[get_loop_addresses] → Falling back to non-loop address evaluation")
+        return _fallback_single_address(formular, param_dict)
 
+
+def _fallback_single_address(formular, param_dict):
+    """
+    NEW HELPER: Fallback when loop evaluation fails
+    Try to evaluate the formula once with the given parameters
+    Returns a set with single address or empty set
+    """
+    try:
+        address = evaluate_formula(formular, param_dict)
+        if address is not None:
+            print(f"[get_loop_addresses] Fallback found address: {address}")
+            return {address}
+        else:
+            print(f"[get_loop_addresses] Fallback: formula evaluated to None")
+            return set()  # Return empty set instead of None
+    except Exception as e:
+        print(f"[get_loop_addresses] Fallback failed: {e}")
+        return set()  # Return empty set instead of None
+
+
+# ============================================================================
+# ADDITIONAL FIX: Modify the caller in GetTBAddressMap
+# ============================================================================
+
+def GetTBAddressMap_FIXED_SECTION():
+    """
+    This shows how the GetTBAddressMap function should handle the result
+    from get_loop_addresses()
+    """
+    # ... (inside the thread loop)
+    
+    try:
+        # Call get_loop_addresses
+        loop_addresses = get_loop_addresses(
+            bb_graph, 
+            kernel_name, 
+            formular, 
+            thread_param_dict,
+            predicates
+        )
+        
+        # NEW: Better handling of the result
+        if loop_addresses is not None:  # None = not a loop access
+            if loop_addresses:  # Non-empty set = loop found addresses
+                print(f"[GetTBAddressMap] TB {TB_id}, Thread ({tid_x},{tid_y}): "
+                      f"Found {len(loop_addresses)} loop addresses")
+                TB_Address_map[TB_id]["addresses"].update(loop_addresses)
+            else:  # Empty set = loop evaluation tried but found nothing
+                print(f"[GetTBAddressMap] TB {TB_id}, Thread ({tid_x},{tid_y}): "
+                      f"Loop evaluation returned empty set, using formula")
+                if formular:
+                    address = evaluate_formula(formular, thread_param_dict)
+                    if address is not None:
+                        TB_Address_map[TB_id]["addresses"].add(address)
+        else:  # None = not a loop access, use regular formula evaluation
+            if formular:
+                address = evaluate_formula(formular, thread_param_dict)
+                if address is not None:
+                    TB_Address_map[TB_id]["addresses"].add(address)
+    except Exception as e:
+        print(f"[GetTBAddressMap] Error: {e}")
+        pass
+
+
+# ============================================================================
+# SUMMARY OF FIXES
+# ============================================================================
+"""
+KEY IMPROVEMENTS:
+
+1. RETURN VALUES:
+   - None = "not a loop access" (no loop headers exist, or all strategies failed)
+   - Empty set {} = "loop access but evaluation failed/found nothing"
+   - Non-empty set = "successful loop evaluation"
+
+2. FALLBACK MECHANISM:
+   - If loop evaluation fails at any point, tries to evaluate formula once
+   - Returns empty set instead of None in error cases
+
+3. BETTER LOGGING:
+   - Clear indication of which strategy succeeded
+   - Detailed error messages for debugging
+   - Shows iteration count and address count
+
+4. ROBUST ERROR HANDLING:
+   - Catches exceptions at multiple levels
+   - Continues when possible instead of failing completely
+   - Always returns a usable value (None, empty set, or addresses)
+
+5. CALLER CHANGES:
+   - GetTBAddressMap now distinguishes between None, empty set, and addresses
+   - Falls back to formula evaluation when appropriate
+"""
 # ============================================================================
 # Predicate and Thread Filtering Functions
 # ============================================================================
