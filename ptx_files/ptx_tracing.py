@@ -1390,7 +1390,70 @@ def make_ctaid_map(formular, kernel_info=None, bb_graph=None, kernel_name=None, 
         print("*****************no ctaid*****************************")
     
     return None
+# ============================================================================
 
+def compute_addresses_for_single_ldglobal(formular, kernel_info, bb_graph, 
+                                          kernel_name, param_dict, loop_trees,
+                                          ctaidx, ctaidy, ntidx, ntidy):
+    """
+    Compute addresses for a SINGLE ld.global instruction across all TBs.
+    
+    This is a wrapper around GetTBAddressMap that handles the case where
+    we want to compute addresses for just one formula pattern.
+    
+    Args:
+        formular: The address formula for this ld.global
+        kernel_info: Kernel metadata including predicates
+        bb_graph: Basic block graph
+        kernel_name: Name of the kernel
+        param_dict: Global parameters
+        loop_trees: Loop syntax trees
+        ctaidx: Grid dimension X
+        ctaidy: Grid dimension Y
+        ntidx: Block dimension X
+        ntidy: Block dimension Y
+        
+    Returns:
+        TB_Address_map: Dict mapping tb_id -> {"addresses": set()}
+                       Returns None if computation fails
+    """
+    
+    # Try to use GetTBAddressMap if we have all required information
+    if kernel_info and bb_graph and kernel_name:
+        try:
+            print(f"  [compute_addresses] Using GetTBAddressMap for this formula")
+            
+            # Set up grid and block dimensions
+            grid_dim = {'x': ctaidx, 'y': ctaidy, 'z': 1}
+            block_dim = {'x': ntidx, 'y': ntidy, 'z': 1}
+            
+            print(f"  [compute_addresses] Grid: {grid_dim}, Block: {block_dim}")
+            
+            TB_Address_map = GetTBAddressMap(
+                syntax_tree=None,  # Not needed, we have formular
+                kernel_name=kernel_name,
+                grid_dim=grid_dim,
+                block_dim=block_dim,
+                bb_graph=bb_graph,
+                predicates=kernel_info.get("predicates", {}),
+                formular=formular,
+                param_dict=param_dict,
+                kernel_info=kernel_info
+            )
+            
+            print(f"  [compute_addresses] ✓ Successfully computed addresses")
+            return TB_Address_map
+            
+        except Exception as e:
+            print(f"  [Warning] GetTBAddressMap failed: {e}")
+            import traceback
+            traceback.print_exc()
+            print(f"  [Warning] Returning None")
+            return None
+    
+    else:
+        print(f"  [Warning] Missing required info for GetTBAddressMap")
+        return None
 
 # ============================================================================
 # file_open - Main Entry Point
@@ -1400,6 +1463,8 @@ def file_open(file_name):
     """
     FIXED: Modified to load and use predicate information
     """
+    global ctaid_map, ctaidx, ctaidy, ntidx, ntidy  # ← ADD THIS LINE
+    
     with open(file_name, "r") as json_file:
         syntax_tree = json.load(json_file)
         
@@ -1472,8 +1537,18 @@ def file_open(file_name):
                 print(f"[Info] Loaded formulas from {formular_file}")
             else:
                 print(f"[Warning] No formula file found: {formular_file}")
+            # =====================================================================
+            # ============================================================================
+            # NEW: Accumulate addresses from ALL ld.global instructions
+            # ============================================================================
+            print(f"\n[file_open] Accumulating addresses from {len(memory_accesses)} ld.global instructions")
             
-            # Process each memory access
+            # Step 1: Initialize combined address map for this kernel
+            combined_TB_Address_map = {}
+            for tb_id in range(ctaidy * ctaidx):
+                combined_TB_Address_map[tb_id] = {"addresses": set()}
+            
+            # Step 2: Process each memory access and ACCUMULATE addresses
             for id_, (key, tree) in tqdm(enumerate(memory_accesses.items()), 
                                          desc=f"Processing {kernel_name}"):
                 
@@ -1494,25 +1569,58 @@ def file_open(file_name):
                                 formular = formular_dict[kernel_name][fkey].get("final_formular", None)
                                 print(f"[Info] Matched {key} -> {fkey}")
                                 break
-                
+    
                 if not formular:
                     print(f"[Warning] No formula found for {key}")
                     continue
                 
-                # Call make_ctaid_map with all parameters
-                TB_Address_map = make_ctaid_map(
+                print(f"\n[file_open] Processing ld.global #{id_+1}/{len(memory_accesses)}: {key}")
+                print(f"  Formula: {formular}")
+                
+                # Compute addresses for THIS ld.global instruction
+                TB_Address_map_single = compute_addresses_for_single_ldglobal(
                     formular=formular,
                     kernel_info=kernel_info,
                     bb_graph=bb_graph,
                     kernel_name=kernel_name,
                     param_dict=param_dict,
-                    loop_trees=loop_trees
+                    loop_trees=loop_trees,
+                    ctaidx=ctaidx,
+                    ctaidy=ctaidy,
+                    ntidx=ntidx,
+                    ntidy=ntidy
                 )
                 
-                # Accumulate locality counts
-                for i in range(ctaidy * ctaidx):
-                    for j in range(i + 1, ctaidy * ctaidx):
-                        kernel_map[j][i] += ctaid_map[j][i]
+                # ACCUMULATE addresses (UNION) into combined map
+                if TB_Address_map_single:
+                    for tb_id, addr_info in TB_Address_map_single.items():
+                        combined_TB_Address_map[tb_id]["addresses"].update(addr_info["addresses"])
+                    
+                    # Debug: show accumulation progress
+                    total_addrs = sum(len(combined_TB_Address_map[tb]["addresses"]) 
+                                     for tb in combined_TB_Address_map)
+                    print(f"  ✓ Accumulated. Total addresses across all TBs: {total_addrs}")
+                    
+            # Step 3: NOW compute locality matrix ONCE from complete address sets
+            print(f"\n[file_open] Computing final locality matrix from combined addresses")
+            num_tbs = ctaidy * ctaidx
+            
+            for i in range(num_tbs):
+                for j in range(i + 1, num_tbs):
+                    # Compute intersection of complete address sets
+                    common = (combined_TB_Address_map[i]["addresses"] & 
+                             combined_TB_Address_map[j]["addresses"])
+                    locality_count = len(common)
+                    
+                    # kernel_map[i][j] = locality_count
+                    kernel_map[j][i] = locality_count
+                    
+                    # Debug: show significant sharing
+                    if locality_count > 0:
+                        print(f"  TB {i} <-> TB {j}: {locality_count} shared addresses")
+
+            print(f"[file_open] ✓ Locality matrix computation complete for {kernel_name}")
+            # =====================================================================
             
             # Generate and save heatmap
             np_kernel_map = np.array(kernel_map)
